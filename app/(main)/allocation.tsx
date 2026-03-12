@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -18,6 +18,7 @@ import { OrderConfirmModal } from '@/components/OrderConfirmModal';
 import { useRebalance } from '@/features/allocation/hooks';
 import { validateAllocation } from '@/features/allocation/engine';
 import { formatKRW, formatPercent } from '@/utils/format';
+import { SearchResult } from '@/brokers/types';
 
 export default function AllocationScreen() {
   const { config, addItem, removeItem, updateItem, loadConfig } = useAllocationStore();
@@ -33,6 +34,9 @@ export default function AllocationScreen() {
   const [newName, setNewName] = useState('');
   const [newRatio, setNewRatio] = useState('');
   const [newType, setNewType] = useState<'stock' | 'etf' | 'cash'>('stock');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     loadConfig();
@@ -58,9 +62,41 @@ export default function AllocationScreen() {
     await execute();
   };
 
+  const handleNameSearch = (text: string) => {
+    setNewName(text);
+    setNewCode('');
+    setSearchResults([]);
+
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    if (!text.trim() || !broker) return;
+
+    searchDebounce.current = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const results = await broker.searchStock(text);
+        setSearchResults(results);
+      } catch {
+        setSearchResults([]);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 400);
+  };
+
+  const handleSelectResult = (result: SearchResult) => {
+    setNewCode(result.code);
+    setNewName(result.name);
+    setNewType(result.type === 'etf' ? 'etf' : 'stock');
+    setSearchResults([]);
+  };
+
   const handleAddItem = async () => {
-    if (!newCode.trim() || !newName.trim() || !newRatio.trim()) {
-      Alert.alert('입력 오류', '코드, 종목명, 비율을 모두 입력해주세요.');
+    if (!newCode.trim()) {
+      Alert.alert('입력 오류', newName.trim() ? '검색 결과에서 종목을 선택해주세요.' : '종목명을 입력해주세요.');
+      return;
+    }
+    if (!newRatio.trim()) {
+      Alert.alert('입력 오류', '목표 비율을 입력해주세요.');
       return;
     }
     const ratio = parseFloat(newRatio);
@@ -77,6 +113,7 @@ export default function AllocationScreen() {
     setNewCode('');
     setNewName('');
     setNewRatio('');
+    setSearchResults([]);
     setShowAddModal(false);
   };
 
@@ -215,19 +252,35 @@ export default function AllocationScreen() {
           <View style={styles.modalContainer}>
             <Text style={styles.modalTitle}>종목 추가</Text>
 
-            <TextInput
-              style={styles.modalInput}
-              placeholder="종목 코드 (예: 005930)"
-              value={newCode}
-              onChangeText={setNewCode}
-              autoCapitalize="none"
-            />
-            <TextInput
-              style={styles.modalInput}
-              placeholder="종목명 (예: 삼성전자)"
-              value={newName}
-              onChangeText={setNewName}
-            />
+            <View>
+              <TextInput
+                style={styles.modalInput}
+                placeholder="종목명으로 검색 (예: 삼성전자)"
+                value={newName}
+                onChangeText={handleNameSearch}
+                autoCorrect={false}
+              />
+              {isSearching && (
+                <ActivityIndicator size="small" color="#4f46e5" style={{ marginTop: 4 }} />
+              )}
+              {searchResults.length > 0 && (
+                <View style={styles.searchDropdown}>
+                  {searchResults.map((r) => (
+                    <TouchableOpacity
+                      key={r.code}
+                      style={styles.searchItem}
+                      onPress={() => handleSelectResult(r)}
+                    >
+                      <Text style={styles.searchItemName}>{r.name}</Text>
+                      <Text style={styles.searchItemMeta}>{r.code} · {r.market} · {r.type === 'etf' ? 'ETF' : '주식'}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+              {newCode ? (
+                <Text style={styles.selectedCode}>선택됨: {newCode}</Text>
+              ) : null}
+            </View>
             <TextInput
               style={styles.modalInput}
               placeholder="목표 비율 (예: 40)"
@@ -333,4 +386,9 @@ const styles = StyleSheet.create({
   modalCancelText: { fontSize: 16, fontWeight: '600', color: '#374151' },
   modalConfirm: { flex: 1, paddingVertical: 14, borderRadius: 12, backgroundColor: '#4f46e5', alignItems: 'center' },
   modalConfirmText: { fontSize: 16, fontWeight: '700', color: '#fff' },
+  searchDropdown: { borderWidth: 1.5, borderColor: '#e5e7eb', borderRadius: 12, marginTop: 4, overflow: 'hidden' },
+  searchItem: { paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  searchItemName: { fontSize: 14, fontWeight: '600', color: '#111827' },
+  searchItemMeta: { fontSize: 12, color: '#6b7280', marginTop: 2 },
+  selectedCode: { fontSize: 12, color: '#4f46e5', marginTop: 4, marginLeft: 4 },
 });

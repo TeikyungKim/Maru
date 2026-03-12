@@ -1,5 +1,14 @@
-export const KIS_BASE_URL = 'https://openapi.koreainvestment.com:9443';
-export const KIS_MOCK_BASE_URL = 'https://openapivts.koreainvestment.com:29443';
+import { Platform } from 'react-native';
+
+export const KIS_BASE_URL =
+  Platform.OS === 'web'
+    ? 'http://localhost:8088/kis'
+    : 'https://openapi.koreainvestment.com:9443';
+
+export const KIS_MOCK_BASE_URL =
+  Platform.OS === 'web'
+    ? 'http://localhost:8088/kis/mock'
+    : 'https://openapivts.koreainvestment.com:29443';
 
 export const STORAGE_KEYS = {
   BROKER: 'maru_broker',
