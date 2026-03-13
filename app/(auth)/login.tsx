@@ -17,10 +17,10 @@ export default function LoginScreen() {
   const router = useRouter();
   const { broker, setAuthenticated } = useBrokerStore();
 
-  const [appKey, setAppKey] = useState('');
-  const [appSecret, setAppSecret] = useState('');
-  const [accountNumber, setAccountNumber] = useState('');
-  const [isMock, setIsMock] = useState(false);
+  const [appKey, setAppKey] = useState('PSylqvUlijAAYkQIeejm82JLmUuW2gXvVSG1');
+  const [appSecret, setAppSecret] = useState('8rsN0tZ9vwHMA7H/4BK96RaJ27JP1mBAyhusq/0XCyep7eS9mDZBTYOwv8zpyZfjIho/EqPcofMNfGFImfFxxyQLaYjyMKOs/P1kKuNao9TvyUSZqy5ov7cqMIpV3+MmO2YEY4Y7vW1Cfz9nzSeZaPflSz7P1HeF4hdCorYI/Kb2DWeOVZM=');
+  const [accountNumber, setAccountNumber] = useState('50174501-01');
+  const [isMock, setIsMock] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
 
   const handleLogin = async () => {

@@ -9,6 +9,7 @@ function makeHeaders(accessToken: string, appKey: string, appSecret: string, trI
     appkey: appKey,
     appsecret: appSecret,
     tr_id: trId,
+    custtype: 'P',
   };
 }
 
@@ -30,11 +31,30 @@ export async function getStockPrice(code: string): Promise<StockPrice> {
     }
   );
 
+  if (response.data.rt_cd !== '0') {
+    throw new Error(response.data.msg1 || '종목 정보를 찾을 수 없습니다.');
+  }
+
   const d = response.data.output;
+  if (!d) throw new Error('응답 데이터가 없습니다.');
+
+  // 개발 환경 응답 디버그
+  if (__DEV__) {
+    console.log('[KIS getStockPrice]', code, {
+      hts_kor_isnm: d.hts_kor_isnm,
+      prdt_name: d.prdt_name,
+      prdt_abrv_name: d.prdt_abrv_name,
+      stck_prpr: d.stck_prpr,
+      rt_cd: response.data.rt_cd,
+    });
+  }
+
+  // KIS API 응답에서 종목명 필드 우선순위: hts_kor_isnm > prdt_name > prdt_abrv_name
+  const name = (d.hts_kor_isnm || d.prdt_name || d.prdt_abrv_name || '').trim();
 
   return {
     code,
-    name: d.hts_kor_isnm,
+    name,
     currentPrice: Number(d.stck_prpr),
     changeAmount: Number(d.prdy_vrss),
     changeRate: Number(d.prdy_ctrt),
@@ -157,29 +177,71 @@ export async function searchStock(keyword: string): Promise<SearchResult[]> {
   const token = await getAccessToken();
   const baseUrl = getBaseUrl(creds.isMock);
 
+  // 숫자만이면 코드 직접 조회, 아니면 이름 검색(CTPF1604R)
+  const isCode = /^\d+$/.test(keyword.trim());
+
+  // 코드 조회: CTPF1002R 시도 → 실패 시 getStockPrice fallback
+  if (isCode) {
+    const code = keyword.trim();
+
+    // CTPF1002R 시도
+    try {
+      const response = await axios.get(
+        `${baseUrl}/uapi/domestic-stock/v1/quotations/search-stock-info`,
+        {
+          headers: makeHeaders(token, creds.appKey, creds.appSecret, 'CTPF1002R'),
+          params: { PDNO: code, PRDT_TYPE_CD: '300' },
+        }
+      );
+      if (response.data.rt_cd === '0' && response.data.output?.pdno) {
+        const item = response.data.output;
+        return [{
+          code: item.pdno,
+          name: item.prdt_abrv_name || item.prdt_name || '',
+          market: item.mket_id_cd === '1' ? 'KOSPI' : 'KOSDAQ',
+          type: item.etf_gb_cd === '1' ? 'etf' : 'stock',
+        }];
+      }
+    } catch {
+      // CTPF1002R 미지원(모의서버 등) — fallback
+    }
+
+    // Fallback: getStockPrice로 이름 조회
+    try {
+      const price = await getStockPrice(code);
+      return [{
+        code,
+        name: price.name,
+        market: '',
+        type: 'stock',
+      }];
+    } catch {
+      // 유효하지 않은 코드
+    }
+
+    return [];
+  }
+
+  // 이름 검색(CTPF1604R)
   const response = await axios.get(
     `${baseUrl}/uapi/domestic-stock/v1/quotations/search-stock-info`,
     {
-      headers: makeHeaders(token, creds.appKey, creds.appSecret, 'CTPF1002R'),
-      params: {
-        PDNO: keyword,
-        PRDT_TYPE_CD: '300',
-      },
+      headers: makeHeaders(token, creds.appKey, creds.appSecret, 'CTPF1604R'),
+      params: { PDNO_ABRV_NAME: keyword, PRDT_TYPE_CD: '300' },
     }
   );
 
   const results: SearchResult[] = [];
-
-  // 주식 검색
-  if (response.data.output) {
-    const item = response.data.output;
-    if (item.pdno) {
-      results.push({
-        code: item.pdno,
-        name: item.prdt_abrv_name,
-        market: item.mket_id_cd === '1' ? 'KOSPI' : 'KOSDAQ',
-        type: item.etf_gb_cd === '1' ? 'etf' : 'stock',
-      });
+  if (response.data.output2) {
+    for (const item of (response.data.output2 as Record<string, string>[]).slice(0, 10)) {
+      if (item.pdno) {
+        results.push({
+          code: item.pdno,
+          name: item.prdt_abrv_name || item.prdt_name || '',
+          market: item.mket_id_cd === '1' ? 'KOSPI' : 'KOSDAQ',
+          type: item.etf_gb_cd === '1' ? 'etf' : 'stock',
+        });
+      }
     }
   }
 

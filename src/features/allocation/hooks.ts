@@ -7,7 +7,7 @@ import { RebalanceResult } from './types';
 
 export function useRebalance() {
   const broker = useBrokerStore((s) => s.broker);
-  const { holdings, balance } = usePortfolioStore();
+  const { holdings, balance, setBalance, setHoldings } = usePortfolioStore();
   const { config } = useAllocationStore();
 
   const [result, setResult] = useState<RebalanceResult | null>(null);
@@ -19,7 +19,25 @@ export function useRebalance() {
   >([]);
 
   const calculate = useCallback(async () => {
-    if (!broker || !holdings || !balance) return;
+    if (!broker) throw new Error('브로커에 연결되어 있지 않습니다.');
+
+    // balance/holdings가 없으면 자동 로드
+    let currentBalance = balance;
+    let currentHoldings = holdings;
+    if (!currentBalance) {
+      try {
+        const [fetchedBalance, fetchedHoldings] = await Promise.all([
+          broker.getAccountBalance(),
+          broker.getHoldings(),
+        ]);
+        setBalance(fetchedBalance);
+        setHoldings(fetchedHoldings);
+        currentBalance = fetchedBalance;
+        currentHoldings = fetchedHoldings;
+      } catch {
+        throw new Error('계좌 정보를 불러올 수 없습니다. 자산현황 화면에서 먼저 연결 상태를 확인해주세요.');
+      }
+    }
 
     setIsCalculating(true);
     setError(null);
@@ -45,18 +63,20 @@ export function useRebalance() {
       });
 
       // 기존 보유 가격도 fallback으로 추가
-      holdings.forEach((h) => {
+      currentHoldings.forEach((h) => {
         if (!prices[h.code]) prices[h.code] = h.currentPrice;
       });
 
-      const rebalanceResult = calculateRebalance(config, holdings, balance, prices);
+      const rebalanceResult = calculateRebalance(config, currentHoldings, currentBalance!, prices);
       setResult(rebalanceResult);
     } catch (e) {
-      setError((e as Error).message);
+      const msg = (e as Error).message;
+      setError(msg);
+      throw new Error(msg);
     } finally {
       setIsCalculating(false);
     }
-  }, [broker, holdings, balance, config]);
+  }, [broker, holdings, balance, config, setBalance, setHoldings]);
 
   const execute = useCallback(async () => {
     if (!broker || !result) return;

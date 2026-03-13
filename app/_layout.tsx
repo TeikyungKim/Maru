@@ -6,9 +6,10 @@ import { useAllocationStore } from '@/store/allocation';
 import { storage } from '@/utils/storage';
 import { STORAGE_KEYS } from '@/utils/constants';
 import { requestPermissions } from '@/notifications/service';
+import { loadCredentials } from '@/brokers/kis/auth';
 
 export default function RootLayout() {
-  const { selectBroker, setAuthenticated } = useBrokerStore();
+  const { selectBroker, setAuthenticated, broker } = useBrokerStore();
   const { loadConfig } = useAllocationStore();
 
   useEffect(() => {
@@ -21,11 +22,26 @@ export default function RootLayout() {
       if (savedBroker) {
         await selectBroker(savedBroker);
 
-        // 저장된 토큰으로 자동 로그인 확인
-        const token = await storage.get(STORAGE_KEYS.KIS_ACCESS_TOKEN);
-        const expires = await storage.get(STORAGE_KEYS.KIS_TOKEN_EXPIRES);
-        if (token && expires && Date.now() < Number(expires)) {
-          setAuthenticated(true);
+        // 인증 정보 메모리 복구
+        const creds = await loadCredentials();
+
+        if (creds) {
+          const token = await storage.get(STORAGE_KEYS.KIS_ACCESS_TOKEN);
+          const expires = await storage.get(STORAGE_KEYS.KIS_TOKEN_EXPIRES);
+
+          if (token && expires && Date.now() < Number(expires)) {
+            // 유효한 토큰 — 자동 로그인
+            setAuthenticated(true);
+          } else {
+            // 토큰 만료 — 자격증명으로 조용히 재발급 시도
+            try {
+              const { issueToken } = await import('@/brokers/kis/auth');
+              await issueToken(creds);
+              setAuthenticated(true);
+            } catch {
+              // 재발급 실패 — 로그인 화면으로
+            }
+          }
         }
       }
 

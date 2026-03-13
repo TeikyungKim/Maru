@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   TextInput,
   Modal,
+  Platform,
 } from 'react-native';
 import { useAllocationStore } from '@/store/allocation';
 import { usePortfolioStore } from '@/store/portfolio';
@@ -17,16 +18,25 @@ import { AllocationChart } from '@/components/AllocationChart';
 import { OrderConfirmModal } from '@/components/OrderConfirmModal';
 import { useRebalance } from '@/features/allocation/hooks';
 import { validateAllocation } from '@/features/allocation/engine';
-import { formatKRW, formatPercent } from '@/utils/format';
+import { formatKRW } from '@/utils/format';
 import { SearchResult } from '@/brokers/types';
 
 export default function AllocationScreen() {
-  const { config, addItem, removeItem, updateItem, loadConfig } = useAllocationStore();
-  const { balance, holdings } = usePortfolioStore();
+  const { config, addItem, removeItem, loadConfig } = useAllocationStore();
+  const { holdings: _holdings } = usePortfolioStore();
   const broker = useBrokerStore((s) => s.broker);
 
-  const { result, isCalculating, isExecuting, error, orderResults, calculate, execute } =
+  const { result, isCalculating, isExecuting, orderResults, calculate, execute } =
     useRebalance();
+
+  const showError = (title: string, message: string) => {
+    if (Platform.OS === 'web') {
+      // eslint-disable-next-line no-alert
+      alert(`${title}\n${message}`);
+    } else {
+      Alert.alert(title, message);
+    }
+  };
 
   const [showConfirm, setShowConfirm] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -36,7 +46,13 @@ export default function AllocationScreen() {
   const [newType, setNewType] = useState<'stock' | 'etf' | 'cash'>('stock');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [isCodeValidated, setIsCodeValidated] = useState(false);
+  const [isValidatingCode, setIsValidatingCode] = useState(false);
+  const [isCodeLooking, setIsCodeLooking] = useState(false);
+  const [codeValidatedNoName, setCodeValidatedNoName] = useState(false);
+  const [searchEmpty, setSearchEmpty] = useState(false);
   const searchDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const codeDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     loadConfig();
@@ -46,10 +62,14 @@ export default function AllocationScreen() {
 
   const handleRebalanceCheck = async () => {
     if (!validation.valid) {
-      Alert.alert('비율 오류', validation.message ?? '비율 합계가 100%가 되어야 합니다.');
+      showError('비율 오류', validation.message ?? '비율 합계가 100%가 되어야 합니다.');
       return;
     }
-    await calculate();
+    try {
+      await calculate();
+    } catch (e) {
+      showError('분석 오류', (e as Error).message);
+    }
   };
 
   const handleExecute = () => {
@@ -59,13 +79,62 @@ export default function AllocationScreen() {
 
   const handleConfirm = async () => {
     setShowConfirm(false);
-    await execute();
+    try {
+      await execute();
+    } catch (e) {
+      showError('주문 오류', (e as Error).message);
+    }
+  };
+
+  const handleDeleteItem = (code: string, name: string) => {
+    if (Platform.OS === 'web') {
+      // eslint-disable-next-line no-restricted-globals
+      if (confirm(`${name}을(를) 삭제하시겠습니까?`)) {
+        removeItem(code);
+      }
+    } else {
+      Alert.alert('삭제', `${name}을(를) 삭제하시겠습니까?`, [
+        { text: '취소', style: 'cancel' },
+        { text: '삭제', style: 'destructive', onPress: () => removeItem(code) },
+      ]);
+    }
+  };
+
+  const handleCodeChange = (text: string) => {
+    const code = text.toUpperCase();
+    setNewCode(code);
+    setIsCodeValidated(false);
+    setNewName('');
+    setSearchResults([]);
+    setSearchEmpty(false);
+
+    if (codeDebounce.current) clearTimeout(codeDebounce.current);
+    if (!broker || !code.trim()) return;
+
+    codeDebounce.current = setTimeout(async () => {
+      setIsCodeLooking(true);
+      try {
+        const price = await broker.getStockPrice(code);
+        if (price.name) {
+          setNewName(price.name);
+          setCodeValidatedNoName(false);
+        } else {
+          // API 성공했지만 이름 없음 → 직접 입력 유도
+          setCodeValidatedNoName(true);
+        }
+        setIsCodeValidated(true);
+      } catch {
+        // 유효하지 않은 코드 또는 API 오류
+      } finally {
+        setIsCodeLooking(false);
+      }
+    }, 500);
   };
 
   const handleNameSearch = (text: string) => {
     setNewName(text);
-    setNewCode('');
     setSearchResults([]);
+    setSearchEmpty(false);
 
     if (searchDebounce.current) clearTimeout(searchDebounce.current);
     if (!text.trim() || !broker) return;
@@ -75,46 +144,104 @@ export default function AllocationScreen() {
       try {
         const results = await broker.searchStock(text);
         setSearchResults(results);
+        setSearchEmpty(results.length === 0);
       } catch {
         setSearchResults([]);
+        setSearchEmpty(false);
       } finally {
         setIsSearching(false);
       }
     }, 400);
   };
 
-  const handleSelectResult = (result: SearchResult) => {
-    setNewCode(result.code);
-    setNewName(result.name);
-    setNewType(result.type === 'etf' ? 'etf' : 'stock');
+  const handleSelectResult = (item: SearchResult) => {
+    setNewCode(item.code);
+    setNewName(item.name);
+    setNewType(item.type === 'etf' ? 'etf' : 'stock');
     setSearchResults([]);
+    setSearchEmpty(false);
+    setIsCodeValidated(true);
+    setCodeValidatedNoName(false);
+  };
+
+  const resetModalState = () => {
+    if (codeDebounce.current) clearTimeout(codeDebounce.current);
+    if (searchDebounce.current) clearTimeout(searchDebounce.current);
+    setNewCode('');
+    setNewName('');
+    setNewRatio('');
+    setNewType('stock');
+    setSearchResults([]);
+    setSearchEmpty(false);
+    setIsCodeValidated(false);
+    setIsCodeLooking(false);
+    setCodeValidatedNoName(false);
   };
 
   const handleAddItem = async () => {
     if (!newCode.trim()) {
-      Alert.alert('입력 오류', newName.trim() ? '검색 결과에서 종목을 선택해주세요.' : '종목명을 입력해주세요.');
+      showError('입력 오류', '종목 코드 또는 종목명을 입력해주세요.');
       return;
     }
     if (!newRatio.trim()) {
-      Alert.alert('입력 오류', '목표 비율을 입력해주세요.');
+      showError('입력 오류', '목표 비율을 입력해주세요.');
       return;
     }
     const ratio = parseFloat(newRatio);
     if (isNaN(ratio) || ratio <= 0) {
-      Alert.alert('입력 오류', '올바른 비율을 입력해주세요.');
+      showError('입력 오류', '올바른 비율을 입력해주세요.');
       return;
     }
-    await addItem({
-      code: newCode.trim().toUpperCase(),
-      name: newName.trim(),
-      targetRatio: ratio,
-      type: newType,
-    });
-    setNewCode('');
-    setNewName('');
-    setNewRatio('');
-    setSearchResults([]);
-    setShowAddModal(false);
+
+    const code = newCode.trim().toUpperCase();
+    let name = newName.trim();
+    let type = newType;
+
+    if (!name && type !== 'cash') {
+      showError('입력 오류', '종목명을 입력해주세요.\n종목명으로 검색하거나 직접 입력하세요.');
+      return;
+    }
+
+    // 수동 입력된 코드 검증 (현금 제외)
+    if (!isCodeValidated && type !== 'cash') {
+      if (!broker) {
+        showError('오류', '브로커에 연결되어 있지 않습니다.');
+        return;
+      }
+      setIsValidatingCode(true);
+      try {
+        // searchStock으로 종목 정보 조회 시도
+        const results = await broker.searchStock(code);
+        const exact = results.find((r) => r.code === code);
+        if (exact) {
+          name = exact.name;
+          type = exact.type === 'etf' ? 'etf' : 'stock';
+        } else {
+          // searchStock이 빈 결과 반환 시 getStockPrice로 fallback
+          const price = await broker.getStockPrice(code);
+          name = price.name || code;
+        }
+      } catch {
+        // searchStock 실패 시 getStockPrice로 fallback
+        try {
+          const price = await broker.getStockPrice(code);
+          name = price.name || code;
+        } catch {
+          showError('잘못된 종목', `'${code}'는 유효하지 않은 종목 코드입니다.\n종목명으로 검색하여 선택해주세요.`);
+          setIsValidatingCode(false);
+          return;
+        }
+      }
+      setIsValidatingCode(false);
+    }
+
+    try {
+      await addItem({ code, name, targetRatio: ratio, type });
+      resetModalState();
+      setShowAddModal(false);
+    } catch (e) {
+      showError('추가 오류', (e as Error).message ?? '종목 추가 중 오류가 발생했습니다.');
+    }
   };
 
   return (
@@ -154,12 +281,9 @@ export default function AllocationScreen() {
               <View style={styles.itemRight}>
                 <Text style={styles.itemRatio}>{item.targetRatio}%</Text>
                 <TouchableOpacity
-                  onPress={() =>
-                    Alert.alert('삭제', `${item.name}을 삭제하시겠습니까?`, [
-                      { text: '취소', style: 'cancel' },
-                      { text: '삭제', style: 'destructive', onPress: () => removeItem(item.code) },
-                    ])
-                  }
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                  style={styles.deleteBtnArea}
+                  onPress={() => handleDeleteItem(item.code, item.name)}
                 >
                   <Text style={styles.deleteBtn}>✕</Text>
                 </TouchableOpacity>
@@ -247,11 +371,41 @@ export default function AllocationScreen() {
       </View>
 
       {/* 종목 추가 모달 */}
-      <Modal visible={showAddModal} transparent animationType="slide">
+      <Modal
+        visible={showAddModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          resetModalState();
+          setShowAddModal(false);
+        }}
+      >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContainer}>
             <Text style={styles.modalTitle}>종목 추가</Text>
 
+            {/* 종목 코드 입력 */}
+            <View>
+              <TextInput
+                style={[styles.modalInput, isCodeValidated && styles.modalInputValid]}
+                placeholder="종목 코드 (예: 005930)"
+                value={newCode}
+                onChangeText={handleCodeChange}
+                autoCorrect={false}
+                autoCapitalize="characters"
+              />
+              {isCodeLooking && (
+                <ActivityIndicator size="small" color="#4f46e5" style={{ marginTop: 4 }} />
+              )}
+              {!isCodeLooking && isCodeValidated && !codeValidatedNoName && (
+                <Text style={styles.validatedHint}>✓ 종목 확인됨</Text>
+              )}
+              {!isCodeLooking && codeValidatedNoName && (
+                <Text style={styles.codeNoNameHint}>코드 확인됨 — 아래에서 종목명을 입력하거나 검색하세요</Text>
+              )}
+            </View>
+
+            {/* 종목명 검색 */}
             <View>
               <TextInput
                 style={styles.modalInput}
@@ -262,6 +416,9 @@ export default function AllocationScreen() {
               />
               {isSearching && (
                 <ActivityIndicator size="small" color="#4f46e5" style={{ marginTop: 4 }} />
+              )}
+              {searchEmpty && !isSearching && (
+                <Text style={styles.searchErrorText}>검색 결과가 없습니다. 다른 종목명을 입력해주세요.</Text>
               )}
               {searchResults.length > 0 && (
                 <View style={styles.searchDropdown}>
@@ -277,10 +434,9 @@ export default function AllocationScreen() {
                   ))}
                 </View>
               )}
-              {newCode ? (
-                <Text style={styles.selectedCode}>선택됨: {newCode}</Text>
-              ) : null}
             </View>
+
+            {/* 목표 비율 */}
             <TextInput
               style={styles.modalInput}
               placeholder="목표 비율 (예: 40)"
@@ -289,6 +445,7 @@ export default function AllocationScreen() {
               keyboardType="numeric"
             />
 
+            {/* 자산 유형 */}
             <View style={styles.typeRow}>
               {(['stock', 'etf', 'cash'] as const).map((t) => (
                 <TouchableOpacity
@@ -304,11 +461,25 @@ export default function AllocationScreen() {
             </View>
 
             <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.modalCancel} onPress={() => setShowAddModal(false)}>
+              <TouchableOpacity
+                style={styles.modalCancel}
+                onPress={() => {
+                  resetModalState();
+                  setShowAddModal(false);
+                }}
+              >
                 <Text style={styles.modalCancelText}>취소</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.modalConfirm} onPress={handleAddItem}>
-                <Text style={styles.modalConfirmText}>추가</Text>
+              <TouchableOpacity
+                style={[styles.modalConfirm, isValidatingCode && styles.disabled]}
+                onPress={handleAddItem}
+                disabled={isValidatingCode}
+              >
+                {isValidatingCode ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.modalConfirmText}>추가</Text>
+                )}
               </TouchableOpacity>
             </View>
           </View>
@@ -356,7 +527,8 @@ const styles = StyleSheet.create({
   itemName: { fontSize: 15, fontWeight: '600', color: '#111827' },
   itemRight: { flexDirection: 'row', alignItems: 'center', gap: 16 },
   itemRatio: { fontSize: 16, fontWeight: '700', color: '#4f46e5' },
-  deleteBtn: { fontSize: 16, color: '#9ca3af', paddingHorizontal: 4 },
+  deleteBtnArea: { padding: 6 },
+  deleteBtn: { fontSize: 16, color: '#9ca3af' },
   addBtn: { marginTop: 12, padding: 12, borderRadius: 10, backgroundColor: '#f3f4f6', alignItems: 'center' },
   addBtnText: { fontSize: 14, fontWeight: '600', color: '#4f46e5' },
   alertText: { fontSize: 14, color: '#d97706', marginBottom: 12 },
@@ -376,6 +548,10 @@ const styles = StyleSheet.create({
   modalContainer: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, gap: 12 },
   modalTitle: { fontSize: 20, fontWeight: '700', color: '#111827', marginBottom: 4 },
   modalInput: { borderWidth: 1.5, borderColor: '#e5e7eb', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12, fontSize: 15, color: '#111827' },
+  modalInputValid: { borderColor: '#16a34a' },
+  validatedHint: { fontSize: 12, color: '#16a34a', marginTop: 4, marginLeft: 4 },
+  codeNoNameHint: { fontSize: 12, color: '#d97706', marginTop: 4, marginLeft: 4 },
+  searchErrorText: { fontSize: 12, color: '#dc2626', marginTop: 4, marginLeft: 4 },
   typeRow: { flexDirection: 'row', gap: 8 },
   typeBtn: { flex: 1, paddingVertical: 10, borderRadius: 10, borderWidth: 1.5, borderColor: '#e5e7eb', alignItems: 'center' },
   typeBtnActive: { backgroundColor: '#4f46e5', borderColor: '#4f46e5' },
@@ -390,5 +566,4 @@ const styles = StyleSheet.create({
   searchItem: { paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
   searchItemName: { fontSize: 14, fontWeight: '600', color: '#111827' },
   searchItemMeta: { fontSize: 12, color: '#6b7280', marginTop: 2 },
-  selectedCode: { fontSize: 12, color: '#4f46e5', marginTop: 4, marginLeft: 4 },
 });
