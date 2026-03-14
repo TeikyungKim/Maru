@@ -73,24 +73,36 @@ export async function getStockInfo(code: string): Promise<StockInfo> {
   const token = await getAccessToken();
   const baseUrl = getBaseUrl(creds.isMock);
 
-  // 주식 현재가 + 종목 상세
-  const [priceRes, detailRes] = await Promise.all([
-    axios.get(`${baseUrl}/uapi/domestic-stock/v1/quotations/inquire-price`, {
-      headers: makeHeaders(token, creds.appKey, creds.appSecret, 'FHKST01010100'),
-      params: { FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code },
-    }),
-    axios.get(`${baseUrl}/uapi/domestic-stock/v1/quotations/search-stock-info`, {
-      headers: makeHeaders(token, creds.appKey, creds.appSecret, 'CTPF1002R'),
-      params: { PDNO: code, PRDT_TYPE_CD: '300' },
-    }),
-  ]);
+  // 현재가 조회
+  const priceRes = await axios.get(`${baseUrl}/uapi/domestic-stock/v1/quotations/inquire-price`, {
+    headers: makeHeaders(token, creds.appKey, creds.appSecret, 'FHKST01010100'),
+    params: { FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: code },
+  });
+
+  if (priceRes.data.rt_cd !== '0') {
+    throw new Error(priceRes.data.msg1 || '종목 정보를 찾을 수 없습니다.');
+  }
 
   const p = priceRes.data.output;
-  const d = detailRes.data.output;
+  if (!p) throw new Error('응답 데이터가 없습니다.');
+
+  // 종목 상세(업종) — 모의투자 서버는 bstp_kor_isnm으로 대체, 실서버는 CTPF1002R
+  let sector = p.bstp_kor_isnm ?? '';
+  if (!creds.isMock) {
+    try {
+      const detailRes = await axios.get(`${baseUrl}/uapi/domestic-stock/v1/quotations/search-stock-info`, {
+        headers: makeHeaders(token, creds.appKey, creds.appSecret, 'CTPF1002R'),
+        params: { PDNO: code, PRDT_TYPE_CD: '300' },
+      });
+      sector = detailRes.data.output?.std_idst_clsf_cd_name ?? sector;
+    } catch {
+      // 업종 정보 없어도 계속
+    }
+  }
 
   return {
     code,
-    name: p.hts_kor_isnm,
+    name: (p.hts_kor_isnm || p.prdt_name || p.prdt_abrv_name || '').trim() || code,
     currentPrice: Number(p.stck_prpr),
     changeAmount: Number(p.prdy_vrss),
     changeRate: Number(p.prdy_ctrt),
@@ -105,7 +117,7 @@ export async function getStockInfo(code: string): Promise<StockInfo> {
     pbr: Number(p.pbr),
     week52High: Number(p.w52_hgpr),
     week52Low: Number(p.w52_lwpr),
-    sector: d?.std_idst_clsf_cd_name ?? '',
+    sector,
   };
 }
 
@@ -184,34 +196,36 @@ export async function searchStock(keyword: string): Promise<SearchResult[]> {
   if (isCode) {
     const code = keyword.trim();
 
-    // CTPF1002R 시도
-    try {
-      const response = await axios.get(
-        `${baseUrl}/uapi/domestic-stock/v1/quotations/search-stock-info`,
-        {
-          headers: makeHeaders(token, creds.appKey, creds.appSecret, 'CTPF1002R'),
-          params: { PDNO: code, PRDT_TYPE_CD: '300' },
+    // CTPF1002R 시도 (모의투자 서버 미지원 → 바로 fallback)
+    if (!creds.isMock) {
+      try {
+        const response = await axios.get(
+          `${baseUrl}/uapi/domestic-stock/v1/quotations/search-stock-info`,
+          {
+            headers: makeHeaders(token, creds.appKey, creds.appSecret, 'CTPF1002R'),
+            params: { PDNO: code, PRDT_TYPE_CD: '300' },
+          }
+        );
+        if (response.data.rt_cd === '0' && response.data.output?.pdno) {
+          const item = response.data.output;
+          return [{
+            code: item.pdno,
+            name: item.prdt_abrv_name || item.prdt_name || '',
+            market: item.mket_id_cd === '1' ? 'KOSPI' : 'KOSDAQ',
+            type: item.etf_gb_cd === '1' ? 'etf' : 'stock',
+          }];
         }
-      );
-      if (response.data.rt_cd === '0' && response.data.output?.pdno) {
-        const item = response.data.output;
-        return [{
-          code: item.pdno,
-          name: item.prdt_abrv_name || item.prdt_name || '',
-          market: item.mket_id_cd === '1' ? 'KOSPI' : 'KOSDAQ',
-          type: item.etf_gb_cd === '1' ? 'etf' : 'stock',
-        }];
+      } catch {
+        // CTPF1002R 미지원 — fallback
       }
-    } catch {
-      // CTPF1002R 미지원(모의서버 등) — fallback
     }
 
-    // Fallback: getStockPrice로 이름 조회
+    // Fallback: getStockPrice로 이름 조회 (모의투자 서버는 종목명 미반환 → code로 대체)
     try {
       const price = await getStockPrice(code);
       return [{
         code,
-        name: price.name,
+        name: price.name || code,
         market: '',
         type: 'stock',
       }];
@@ -222,14 +236,28 @@ export async function searchStock(keyword: string): Promise<SearchResult[]> {
     return [];
   }
 
-  // 이름 검색(CTPF1604R)
-  const response = await axios.get(
-    `${baseUrl}/uapi/domestic-stock/v1/quotations/search-stock-info`,
-    {
-      headers: makeHeaders(token, creds.appKey, creds.appSecret, 'CTPF1604R'),
-      params: { PDNO_ABRV_NAME: keyword, PRDT_TYPE_CD: '300' },
-    }
-  );
+  // 이름 검색(CTPF1604R) — 모의투자 서버에서는 미지원
+  if (creds.isMock) {
+    throw new Error('모의투자 환경에서는 이름 검색이 지원되지 않습니다.\n종목 코드(숫자)로 검색해 주세요.');
+  }
+
+  let response;
+  try {
+    response = await axios.get(
+      `${baseUrl}/uapi/domestic-stock/v1/quotations/search-stock-info`,
+      {
+        headers: makeHeaders(token, creds.appKey, creds.appSecret, 'CTPF1604R'),
+        params: { PDNO_ABRV_NAME: keyword, PRDT_TYPE_CD: '300' },
+      }
+    );
+  } catch (e: unknown) {
+    const msg = (e as { response?: { data?: { msg1?: string } } })?.response?.data?.msg1;
+    throw new Error(msg || '종목 검색 중 오류가 발생했습니다.');
+  }
+
+  if (response.data.rt_cd !== '0') {
+    throw new Error(response.data.msg1 || '종목 검색에 실패했습니다.');
+  }
 
   const results: SearchResult[] = [];
   if (response.data.output2) {
